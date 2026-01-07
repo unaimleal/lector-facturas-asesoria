@@ -8,6 +8,7 @@ import time
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Extractor Facturas AI", layout="wide")
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 # --- FUNCIONES DE LÓGICA (BACKEND) ---
 
@@ -39,8 +40,7 @@ def dividir_pdf_en_memoria(uploaded_file):
     
     return archivos_individuales
 
-def procesar_con_gemini(archivo_bytes, modelo_nombre, api_key):
-    genai.configure(api_key=api_key)
+def procesar_con_gemini(archivo_bytes, modelo_nombre):
     # Usamos gemini-1.5-flash (el 2.5 aún no es público estable para API general)
     model = genai.GenerativeModel(
         modelo_nombre,
@@ -106,7 +106,6 @@ st.markdown("Arrastra tus PDFs y genera el Excel automáticamente.")
 # 1. BARRA LATERAL: Configuración
 with st.sidebar:
     st.header("Configuración")
-    api_key = st.text_input("Tu API Key de Google", type="password")
     modelo = st.selectbox("Modelo AI", ["gemini-2.5-flash", "gemini-2.5-pro"])
     st.info("Nota: Flash es más rápido y barato. Pro es más preciso.")
 
@@ -133,9 +132,7 @@ with col2:
 
 # 3. BOTÓN DE PROCESO
 if st.button("🚀 Procesar Facturas", type="primary"):
-    if not api_key:
-        st.warning("⚠️ Por favor introduce la API Key en la barra lateral.")
-    elif not uploaded_files:
+    if not uploaded_files:
         st.warning("⚠️ No has subido ningún archivo.")
     else:
         # Barra de progreso
@@ -160,7 +157,7 @@ if st.button("🚀 Procesar Facturas", type="primary"):
             contador_interno += 1 # Incrementamos el número interno
             estado.write(f"Procesando {i+1}/{total_docs}: {nombre}...")
             
-            datos = procesar_con_gemini(buffer, modelo, api_key)
+            datos = procesar_con_gemini(buffer, modelo)
             
             if datos:
                 # Añadir el número interno calculado
