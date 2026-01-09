@@ -36,8 +36,8 @@ def procesar_con_gemini(uploaded_file, modelo_nombre):
     INSTRUCCIONES CRÍTICAS SOBRE IMPUESTOS:
     1. Si la factura tiene UN SOLO tipo de IVA: Extrae base, cuota y tipo normalmente.
     2. Si la factura tiene VARIOS tipos de IVA (ej: 21% y 10%, o 21% y Exento/0%):
-       DEBES devolver 'base_imponible', 'cuota_iva' y 'tipo_iva' como null (nulo).
-       Sin embargo, SÍ debes extraer la 'fecha', el 'numero_factura' y el 'total_factura'.
+       DEBES devolver 'base_imponible', 'cuota_iva', 'fecha' y 'tipo_iva' como null (nulo).
+       Sin embargo, SÍ debes extraer el 'nombre_proveedor', el 'numero_factura' y el 'total_factura'.
 
     OTROS CAMPOS:
     - 'nif_emisor': NIF de quien EMITE la factura.
