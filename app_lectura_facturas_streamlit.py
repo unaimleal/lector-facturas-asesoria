@@ -40,7 +40,7 @@ def procesar_con_gemini(uploaded_file, modelo_nombre):
        Sin embargo, SÍ debes extraer el 'nombre_proveedor', el 'numero_factura' y el 'total_factura'.
 
     OTROS CAMPOS:
-    - 'nif_emisor': NIF de quien EMITE la factura.
+    - 'nif_emisor': NIF de quien EMITE la factura, sin guiones, barras o puntos, solo las letras y numeros
     - 'nombre_proveedor': Nombre fiscal de la empresa emisora.
     - Fechas: DD/MM/AAAA.
     
