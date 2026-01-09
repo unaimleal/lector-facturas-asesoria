@@ -47,7 +47,7 @@ def procesar_con_gemini(uploaded_file, modelo_nombre):
     Devuelve JSON estrictamente válido:
     {
         "nif_emisor": "string",
-        "fecha": "string",
+        "fecha": "string" or null,
         "numero_factura": "string",
         "nombre_proveedor": "string",
         "base_imponible": float or null,
