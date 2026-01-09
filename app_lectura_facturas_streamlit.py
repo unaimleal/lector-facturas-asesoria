@@ -96,8 +96,7 @@ st.markdown("Arrastra tus PDFs. **Nota:** Cada archivo PDF se cuenta como una ú
 # 1. BARRA LATERAL: Configuración
 with st.sidebar:
     st.header("Configuración")
-    # Nota: Gemini 1.5 es el estable actual para archivos. 
-    modelo = st.selectbox("Modelo AI", ["gemini-1.5-flash", "gemini-1.5-pro"])
+    modelo = st.selectbox("Modelo AI", ["gemini-2.5-flash", "gemini-2.5-pro"])
     st.info("Flash es rápido. Pro es más preciso con facturas complejas.")
 
 # 2. ZONA PRINCIPAL: Entradas
