@@ -186,6 +186,8 @@ if st.button("🚀 Procesar Facturas", type="primary"):
             for col in columnas_nuevas:
                 if col not in df.columns:
                     df[col] = ""
+                else:
+                    df[col] = df[col].astype('Int64')
 
             df['SECCION'] = ""
 
