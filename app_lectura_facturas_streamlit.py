@@ -110,7 +110,7 @@ with col1:
         help="La primera factura de este lote será este número + 1"
     )
 
-    archivo_maestro = st.file_uploader("Subir Maestro Proveedores (Excel)", type=["xlsx", "xls"])
+    archivo_maestro = st.file_uploader("Subir Maestro Proveedores (Excel)", type=["xlsx", "xls", "csv"])
 
 with col2:
     uploaded_files = st.file_uploader(
@@ -220,9 +220,6 @@ if st.button("🚀 Procesar Facturas", type="primary"):
 
             # Reindexamos: Esto descarta todo lo que no esté en la lista y ordena
             df_final = df.reindex(columns=orden_final)
-            
-            # Rellenar los valores nulos (NaN) con cadena vacía para que el Excel quede limpio
-            df_final = df_final.fillna("")
 
             st.success("Análisis y cruce completado.")
             st.dataframe(df_final)
