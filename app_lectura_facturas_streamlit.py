@@ -4,6 +4,11 @@ from google.genai import types
 import json
 import pandas as pd
 import io
+import os
+import re
+import csv
+from copy import copy
+import openpyxl
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Extractor Facturas AI", layout="wide")
@@ -13,6 +18,12 @@ MODELOS = {
     "Económico y rápido · Gemini 3.5 Flash-Lite (recomendado)": "gemini-3.5-flash-lite",
     "Más preciso · Gemini 3.8 Flash": "gemini-3.8-flash",
 }
+
+# Plantilla del Excel de salida (debe estar en la misma carpeta que app.py)
+RUTA_PLANTILLA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plantilla_entrada_apuntes.xlsx")
+HOJA_COMPRAS = "Compras"
+FILA_INICIO_COMPRAS = 5   # la fila 4 son las cabeceras
+FILA_MODELO_ESTILO = 98   # última fila formateada de la plantilla (se copia su estilo si hay más facturas)
 
 try:
     client = genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
@@ -48,8 +59,6 @@ Devuelve JSON estrictamente válido:
 """
 
 
-# --- FUNCIONES DE LÓGICA (BACKEND) ---
-
 def procesar_con_gemini(uploaded_file, modelo_id):
     """Envía el PDF completo a Gemini y devuelve los datos de la factura."""
     try:
@@ -62,7 +71,7 @@ def procesar_con_gemini(uploaded_file, modelo_id):
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
         datos = json.loads(response.text)
-        if isinstance(datos, list):  # por si el modelo devuelve una lista
+        if isinstance(datos, list):
             datos = datos[0]
         return datos
     except Exception as e:
@@ -70,30 +79,119 @@ def procesar_con_gemini(uploaded_file, modelo_id):
         return None
 
 
-def limpiar_nif(serie):
-    return (
-        serie.astype(str)
-        .str.replace(r"\.0$", "", regex=True)
-        .str.replace("-", "", regex=False)
-        .str.replace(" ", "", regex=False)
-        .str.replace("ES", "", regex=False)
-        .str.strip()
-        .str.upper()
-    )
+# --- HELPERS (sin dependencia de Streamlit) ---
+
+def limpiar_nif(valor):
+    """Deja solo letras y números en mayúsculas y quita el prefijo 'ES' si sobra."""
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return ""
+    s = re.sub(r"[^A-Z0-9]", "", str(valor).upper())
+    if s in ("NONE", "NAN", "NULL"):
+        return ""
+    if s.startswith("ES") and len(s) == 11:
+        s = s[2:]
+    return s
 
 
-def plantilla_maestro():
-    df = pd.DataFrame(
-        {
-            "NIF": ["B12345678", "A87654321"],
-            "Cuenta": [4000001, 4000002],
-            "Contrapartida": [6290001, 6220001],
-        }
-    )
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-    return buf.getvalue()
+def _filas_crudas(archivo):
+    """Lee el CSV/Excel del maestro como lista de filas (listas de texto), sin interpretar nada."""
+    nombre = archivo.name.lower()
+    contenido = archivo.getvalue()
+    if nombre.endswith(".csv"):
+        try:
+            texto = contenido.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            texto = contenido.decode("cp1252")
+        delim = ";" if texto.count(";") >= texto.count(",") else ","
+        return [[c.strip() for c in fila] for fila in csv.reader(io.StringIO(texto), delimiter=delim)]
+    df = pd.read_excel(io.BytesIO(contenido), header=None, dtype=str).fillna("")
+    return [[str(c).strip() for c in fila] for fila in df.values.tolist()]
+
+
+def leer_maestro(archivo):
+    """
+    Lee el 'INFORME PLAN CONTABLE' tal cual sale del programa:
+    busca solo la fila de cabeceras (Cuenta / NIF / Contrapartida), ignora las filas de
+    arriba y la línea de guiones, y se queda con las cuentas que tienen NIF.
+    Devuelve (df con NIF, Cuenta, Contrapartida, lista de NIF repetidos).
+    """
+    filas = _filas_crudas(archivo)
+    idx_cab = None
+    for i, fila in enumerate(filas):
+        celdas = [c.lower() for c in fila]
+        if "cuenta" in celdas and "nif" in celdas:
+            idx_cab = i
+            break
+    if idx_cab is None:
+        raise ValueError("No encuentro la fila de cabeceras (Cuenta, NIF, Contrapartida) en el fichero.")
+
+    cab = [c.lower() for c in filas[idx_cab]]
+    i_cuenta = cab.index("cuenta")
+    i_nif = cab.index("nif")
+    i_contra = cab.index("contrapartida") if "contrapartida" in cab else None
+
+    registros = []
+    for fila in filas[idx_cab + 1:]:
+        def celda(i):
+            return fila[i].strip() if i is not None and i < len(fila) else ""
+        cuenta = re.sub(r"\.0$", "", celda(i_cuenta))
+        nif = limpiar_nif(celda(i_nif))
+        if not cuenta.isdigit() or not nif:
+            continue  # salta guiones, cuentas de grupo sin NIF, líneas vacías...
+        contra = re.sub(r"\.0$", "", celda(i_contra))
+        registros.append({"NIF": nif, "Cuenta": cuenta, "Contrapartida": contra})
+
+    df = pd.DataFrame(registros, columns=["NIF", "Cuenta", "Contrapartida"])
+    repetidos = sorted(df.loc[df["NIF"].duplicated(keep=False), "NIF"].unique().tolist())
+    df = df.drop_duplicates("NIF", keep="first")
+    return df, repetidos
+
+
+def _num(v):
+    """Convierte a número (int si es entero) o None."""
+    if v is None or v == "" or (isinstance(v, float) and pd.isna(v)) or v is pd.NA:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return int(f) if f.is_integer() else f
+
+
+def _txt(v):
+    if v is None or v is pd.NA or (isinstance(v, float) and pd.isna(v)):
+        return None
+    s = str(v).strip()
+    return s if s else None
+
+
+def generar_excel(df_final):
+    """Rellena la pestaña Compras de la plantilla y devuelve los bytes del .xlsx."""
+    wb = openpyxl.load_workbook(RUTA_PLANTILLA)
+    ws = wb[HOJA_COMPRAS]
+
+    for i, fila in enumerate(df_final.to_dict("records")):
+        r = FILA_INICIO_COMPRAS + i
+        if r > FILA_MODELO_ESTILO:  # más facturas que filas formateadas: copiar estilo
+            for c in range(1, 11):
+                ws.cell(r, c)._style = copy(ws.cell(FILA_MODELO_ESTILO, c)._style)
+
+        ws.cell(r, 1).value = _txt(fila["FECHA"])
+        ws.cell(r, 2).value = _num(fila["COD.PROVEED"])
+        ws.cell(r, 3).value = _txt(fila["Nº FRA."])
+        ws.cell(r, 4).value = _txt(fila["COMENTARIO"])
+        ws.cell(r, 5).value = _num(fila["TOTAL FRA."])
+        ws.cell(r, 6).value = _num(fila["COD. GASTOS"])
+        ws.cell(r, 7).value = _num(fila["TIPO IVA"])
+        ws.cell(r, 8).value = None
+        ws.cell(r, 9).value = _num(fila["BASE IMP."])    # None => se borra la fórmula (varios IVA)
+        ws.cell(r, 10).value = _num(fila["CUOTA IVA"])
+        for c in (2, 6):  # códigos como número, no como texto
+            ws.cell(r, c).number_format = "General"
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
 # --- INTERFAZ DE USUARIO (FRONTEND) ---
@@ -106,41 +204,41 @@ with st.expander("ℹ️ ¿Qué tengo que subir? (guía rápida)", expanded=True
 **Necesitas 3 cosas:**
 
 **1. Último número interno registrado** (campo numérico)
-Es el último número de registro que ya usasteis en la contabilidad. La primera factura de este lote
-será ese número **+ 1**, y las siguientes irán correlativas.
+El último número de registro interno que ya habéis usado. La primera factura de este lote
+será ese número **+ 1** y las siguientes irán correlativas.
 
-**2. Maestro de proveedores (Excel)** — *opcional pero recomendable*
-Un Excel (`.xlsx`, `.xls`) o `.csv` con **una fila por proveedor** y **exactamente estas 3 columnas**
-(en la primera fila, con estos nombres):
+**2. Informe Plan Contable (CSV o Excel)**
+Súbelo **tal cual sale del programa de contabilidad** (*INFORME PLAN CONTABLE*), **sin editarlo**.
+La app ignora sola las primeras filas, la línea de guiones y las cuentas sin NIF. Solo usa estas columnas:
 
-| Columna | Qué contiene | Ejemplo |
-|---|---|---|
-| `NIF` | NIF/CIF del proveedor (da igual si lleva guiones, espacios o "ES") | B12345678 |
-| `Cuenta` | Código de la cuenta del proveedor → saldrá como **COD.PROVEED** | 4000001 |
-| `Contrapartida` | Cuenta de gasto habitual → saldrá como **COD. GASTOS** | 6290001 |
+| Columna | Para qué se usa |
+|---|---|
+| `NIF` | Para identificar al proveedor de cada factura |
+| `Cuenta` | Sale como **COD.PROVEED** |
+| `Contrapartida` | Sale como **COD. GASTOS** |
 
-La app cruza el NIF que lee de cada factura con este maestro. Si un proveedor no está en el maestro,
-sus códigos saldrán **vacíos** (te avisamos al terminar).
+Si un proveedor no está en el informe, sus códigos salen **vacíos** (te avisamos al terminar).
+Si un NIF aparece en dos cuentas, se usa la primera.
 
 **3. Facturas en PDF**
 Sube todos los PDFs del lote. **Cada PDF = una factura** (aunque tenga varias páginas).
 No metas dos facturas distintas en el mismo PDF.
 
-**Qué obtienes:** un Excel con las columnas FECHA, COD.PROVEED, Nº FRA., COMENTARIO, TOTAL FRA.,
-COD. GASTOS, TIPO IVA, SECCION, BASE IMP. y CUOTA IVA.
+**Qué obtienes:** el Excel de *entrada de apuntes* con sus 4 pestañas (Ventas, Compras, Estandar y Banco 1).
+**Solo se rellena Compras**; las demás quedan vacías.
 
 ⚠️ **Facturas con varios tipos de IVA** (ej. 21 % y 10 %): FECHA, TIPO IVA, BASE IMP. y CUOTA IVA
-salen **vacíos a propósito**; hay que rellenarlos a mano. Sí salen el nº de factura, el proveedor y el total.
+salen **vacíos a propósito** y hay que rellenarlos a mano. Sí salen el nº de factura, el proveedor y el total.
         """
     )
-    st.download_button(
-        "📥 Descargar plantilla de ejemplo del maestro",
-        data=plantilla_maestro(),
-        file_name="plantilla_maestro_proveedores.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+
+if not os.path.exists(RUTA_PLANTILLA):
+    st.error(
+        "Falta el archivo **plantilla_entrada_apuntes.xlsx** junto a app.py. "
+        "Súbelo al repositorio (misma carpeta que app.py)."
     )
 
-# 1. BARRA LATERAL: Configuración
+# BARRA LATERAL
 with st.sidebar:
     st.header("Configuración")
     modelo_label = st.selectbox("Modelo AI", list(MODELOS.keys()))
@@ -150,7 +248,7 @@ with st.sidebar:
         "Si falla con facturas complejas o escaneadas, prueba Gemini 3.8 Flash."
     )
 
-# 2. ZONA PRINCIPAL: Entradas
+# ZONA PRINCIPAL
 col1, col2 = st.columns(2)
 with col1:
     ultimo_numero = st.number_input(
@@ -160,10 +258,9 @@ with col1:
         step=1,
         help="La primera factura de este lote será este número + 1",
     )
-
     archivo_maestro = st.file_uploader(
-        "2️⃣ Maestro de proveedores (Excel con columnas: NIF, Cuenta, Contrapartida)",
-        type=["xlsx", "xls", "csv"],
+        "2️⃣ Informe Plan Contable (CSV o Excel, tal cual sale del programa)",
+        type=["csv", "xlsx", "xls"],
     )
 
 with col2:
@@ -173,12 +270,13 @@ with col2:
         accept_multiple_files=True,
     )
 
-# 3. BOTÓN DE PROCESO
 if st.button("🚀 Procesar Facturas", type="primary"):
     if not uploaded_files:
         st.warning("⚠️ No has subido ningún archivo.")
     elif client is None:
         st.error("Falta la API KEY, no se puede procesar.")
+    elif not os.path.exists(RUTA_PLANTILLA):
+        st.error("Falta la plantilla del Excel (plantilla_entrada_apuntes.xlsx).")
     else:
         progreso = st.progress(0)
         estado = st.empty()
@@ -205,54 +303,39 @@ if st.button("🚀 Procesar Facturas", type="primary"):
         if datos_totales:
             df = pd.DataFrame(datos_totales)
 
-            if "nif_emisor" in df.columns:
-                df["NIF"] = limpiar_nif(df["nif_emisor"])
-                df["NIF"] = df["NIF"].replace({"NONE": "", "NAN": ""})
-            else:
-                df["NIF"] = ""
+            df["NIF"] = df["nif_emisor"].map(limpiar_nif) if "nif_emisor" in df.columns else ""
 
-            columnas_base = [
-                "nombre_proveedor", "fecha", "numero_factura",
-                "base_imponible", "tipo_iva", "cuota_iva", "total_factura",
-            ]
-            for col in columnas_base:
+            for col in ["nombre_proveedor", "fecha", "numero_factura",
+                        "base_imponible", "tipo_iva", "cuota_iva", "total_factura"]:
                 if col not in df.columns:
-                    df[col] = ""
+                    df[col] = None
+
+            df["COD.PROVEED"] = pd.NA
+            df["COD. GASTOS"] = pd.NA
 
             if archivo_maestro is not None:
                 try:
-                    if archivo_maestro.name.lower().endswith(".csv"):
-                        df_maestro = pd.read_csv(archivo_maestro, sep=None, engine="python")
-                    else:
-                        df_maestro = pd.read_excel(archivo_maestro)
-
-                    if {"NIF", "Cuenta", "Contrapartida"}.issubset(df_maestro.columns):
-                        df_maestro["NIF"] = limpiar_nif(df_maestro["NIF"])
-                        df_maestro = df_maestro[["NIF", "Cuenta", "Contrapartida"]].drop_duplicates("NIF")
-                        df = pd.merge(df, df_maestro, on="NIF", how="left")
-                        df = df.rename(columns={"Cuenta": "COD.PROVEED", "Contrapartida": "COD. GASTOS"})
-                    else:
-                        st.error("El Excel maestro debe tener las columnas: NIF, Cuenta, Contrapartida")
+                    df_maestro, repetidos = leer_maestro(archivo_maestro)
+                    df = df.drop(columns=["COD.PROVEED", "COD. GASTOS"])
+                    df = pd.merge(df, df_maestro, on="NIF", how="left")
+                    df = df.rename(columns={"Cuenta": "COD.PROVEED", "Contrapartida": "COD. GASTOS"})
+                    if repetidos:
+                        st.info("NIF con más de una cuenta en el informe (se usó la primera): " + ", ".join(repetidos))
                 except Exception as e:
-                    st.error(f"Error al cruzar con el Excel maestro: {e}")
+                    st.error(f"Error al leer el Informe Plan Contable: {e}")
 
             for col in ["COD.PROVEED", "COD. GASTOS"]:
-                if col not in df.columns:
-                    df[col] = ""
-                else:
-                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+                df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
-            # Aviso de proveedores que no estaban en el maestro
-            if archivo_maestro is not None and "COD.PROVEED" in df.columns:
+            if archivo_maestro is not None:
                 sin_cod = df[df["COD.PROVEED"].isna()]
                 if not sin_cod.empty:
                     st.warning(
-                        f"{len(sin_cod)} factura(s) sin código de proveedor (NIF no encontrado en el maestro): "
+                        f"{len(sin_cod)} factura(s) sin código de proveedor (NIF no encontrado en el informe): "
                         + ", ".join(sin_cod["archivo_origen"].astype(str))
                     )
 
             df["SECCION"] = ""
-
             df["COMENTARIO"] = df.apply(
                 lambda x: f"{x.get('numero_interno', '')} | {x.get('numero_factura', '')} | {x.get('nombre_proveedor', '')}",
                 axis=1,
@@ -276,14 +359,10 @@ if st.button("🚀 Procesar Facturas", type="primary"):
             st.success("Análisis y cruce completado.")
             st.dataframe(df_final)
 
-            buffer_excel = io.BytesIO()
-            with pd.ExcelWriter(buffer_excel, engine="openpyxl") as writer:
-                df_final.to_excel(writer, index=False)
-
             st.download_button(
-                label="📥 Descargar Excel",
-                data=buffer_excel.getvalue(),
-                file_name=f"facturas_procesadas_desde_{ultimo_numero + 1}.xlsx",
+                label="📥 Descargar Excel (entrada de apuntes)",
+                data=generar_excel(df_final),
+                file_name=f"entrada_de_apuntes_desde_{ultimo_numero + 1}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
